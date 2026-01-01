@@ -136,8 +136,9 @@ All configuration and data is stored in `~/.pomodoro/`:
 - Try restarting your terminal
 
 **Web interface won't open:**
-- Check if port 5000 is already in use
-- The server runs on `http://localhost:5000` by default
+- Check if port 8080 is already in use
+- The server runs on `http://localhost:8080` by default
+- If port 8080 is unavailable, the app will automatically try alternative ports
 
 **Statistics not showing:**
 - Make sure you've completed at least one Pomodoro session

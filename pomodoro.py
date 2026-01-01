@@ -12,6 +12,8 @@ import argparse
 import re
 import sqlite3
 import json
+import subprocess
+import socket
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -1138,8 +1140,161 @@ def parse_duration(duration_str):
     
     return total_seconds if total_seconds > 0 else 25 * 60
 
+def is_port_in_use(port):
+    """Check if a port is already in use"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('127.0.0.1', port))
+            return False  # Port is available
+        except OSError:
+            return True  # Port is in use
+
+def is_airplay_using_port(port):
+    """Check if AirPlay Receiver is using the specified port"""
+    try:
+        # Try to connect and check the Server header
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(f'http://127.0.0.1:{port}/')
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            with urllib.request.urlopen(req, timeout=1) as response:
+                server_header = response.headers.get('Server', '')
+                if 'AirTunes' in server_header or 'AirPlay' in server_header:
+                    return True
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError):
+            # If we can't connect, check the process name
+            pass
+        
+        # Also check process name
+        result = subprocess.run(
+            ['lsof', '-ti', f':{port}'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                if pid.strip():
+                    try:
+                        ps_result = subprocess.run(
+                            ['ps', '-p', pid.strip(), '-o', 'command='],
+                            capture_output=True,
+                            text=True,
+                            check=False
+                        )
+                        process_cmd = ps_result.stdout.strip().lower()
+                        if 'airplay' in process_cmd or 'controlcenter' in process_cmd:
+                            return True
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return False
+
+def find_available_port(start_port=5000, max_attempts=10):
+    """Find an available port starting from start_port"""
+    for port in range(start_port, start_port + max_attempts):
+        if not is_port_in_use(port):
+            return port
+    return None
+
+def kill_process_on_port(port):
+    """Kill any process using the specified port"""
+    try:
+        # Use lsof to find the process using the port
+        result = subprocess.run(
+            ['lsof', '-ti', f':{port}'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode == 0 and result.stdout.strip():
+            pids = result.stdout.strip().split('\n')
+            for pid in pids:
+                if pid.strip():
+                    try:
+                        # Try to get process info to verify it's a pomodoro process
+                        ps_result = subprocess.run(
+                            ['ps', '-p', pid.strip(), '-o', 'command='],
+                            capture_output=True,
+                            text=True,
+                            check=False
+                        )
+                        
+                        process_cmd = ps_result.stdout.strip().lower()
+                        # Check if it's a pomodoro-related process
+                        if 'pomodoro' in process_cmd or 'python' in process_cmd:
+                            print(f"Found existing process on port {port} (PID: {pid.strip()})")
+                            print(f"Process: {process_cmd}")
+                            
+                            # Kill the process
+                            subprocess.run(['kill', '-9', pid.strip()], check=False)
+                            print(f"Killed process {pid.strip()}")
+                            time.sleep(1.0)  # Give it more time to release the port
+                            return True
+                    except Exception as e:
+                        # If we can't verify, still try to kill it (might be a stale process)
+                        print(f"Attempting to kill process {pid.strip()} on port {port}")
+                        subprocess.run(['kill', '-9', pid.strip()], check=False)
+                        time.sleep(1.0)  # Give it more time to release the port
+                        return True
+    except FileNotFoundError:
+        # lsof not available (unlikely on macOS/Linux, but handle gracefully)
+        print("Warning: 'lsof' command not found. Cannot check for existing processes.")
+        return False
+    except Exception as e:
+        print(f"Error checking for processes on port {port}: {e}")
+        return False
+    
+    return False
+
 def start_stats_server():
     """Start Flask server for stats web interface"""
+    # Use a less common port to avoid conflicts with AirPlay Receiver and other services
+    preferred_port = 8080
+    port = preferred_port
+    
+    if is_port_in_use(preferred_port):
+        print(f"Port {preferred_port} is already in use. Checking for existing pomodoro processes...")
+        
+        # Check if it's AirPlay Receiver (common on macOS)
+        if is_airplay_using_port(preferred_port):
+            print(f"⚠️  Port {preferred_port} is being used by AirPlay Receiver.")
+            print("   This is a common issue on macOS. AirPlay Receiver uses port 5000 by default.")
+            print("   To fix this permanently:")
+            print("   1. Go to System Settings > General > AirDrop & Handoff")
+            print("   2. Turn off 'AirPlay Receiver'")
+            print("   Or we can use a different port for the stats server.")
+            print()
+            print("   Automatically switching to port 5001...")
+            port = find_available_port(5001, 10)
+            if port is None:
+                print("Error: Could not find an available port. Please disable AirPlay Receiver or free up a port.")
+                sys.exit(1)
+        else:
+            # Try to kill existing pomodoro processes
+            kill_process_on_port(preferred_port)
+            
+            # Verify the port is now free
+            if is_port_in_use(preferred_port):
+                print(f"Port {preferred_port} is still in use by another process.")
+                print("Trying to find an alternative port...")
+                port = find_available_port(5001, 10)
+                if port is None:
+                    print("Error: Could not find an available port. Please free up a port.")
+                    sys.exit(1)
+                print(f"Using alternative port: {port}")
+            else:
+                print(f"Port {preferred_port} is now available.")
+                port = preferred_port
+    else:
+        print(f"Port {port} is available.")
+    
     try:
         from flask import Flask, render_template_string, jsonify, request
     except ImportError:
@@ -1151,9 +1306,34 @@ def start_stats_server():
     color_manager = TaskColorManager()
     caldav_sync = CalDAVSync(db)
     
+    # Add request logging
+    @app.before_request
+    def log_request():
+        print(f"Request: {request.method} {request.path}")
+    
+    @app.after_request
+    def log_response(response):
+        print(f"Response: {response.status_code} for {request.path}")
+        return response
+    
+    @app.route('/health')
+    def health():
+        """Simple health check endpoint"""
+        return jsonify({'status': 'ok', 'message': 'Pomodoro stats server is running'})
+    
     @app.route('/')
     def index():
-        return render_template_string(STATS_HTML)
+        try:
+            return render_template_string(STATS_HTML)
+        except NameError as e:
+            # STATS_HTML might not be defined yet
+            print(f"Error: STATS_HTML not defined: {e}")
+            return f"<h1>Error: Stats HTML template not loaded. Please check the application.</h1>", 500
+        except Exception as e:
+            print(f"Error rendering stats page: {e}")
+            import traceback
+            traceback.print_exc()
+            return f"<h1>Error loading stats page</h1><p>{str(e)}</p>", 500
     
     @app.route('/api/stats')
     def api_stats():
@@ -1456,17 +1636,30 @@ def start_stats_server():
     sync_thread = threading.Thread(target=background_sync, daemon=True)
     sync_thread.start()
     
-    # Open browser after a short delay
+    # Open browser after server is ready
     def open_browser():
-        time.sleep(1.5)
-        webbrowser.open('http://127.0.0.1:5000')
+        # Wait a bit longer to ensure server is fully started
+        time.sleep(2.5)
+        try:
+            webbrowser.open(f'http://127.0.0.1:{port}')
+        except Exception as e:
+            print(f"Could not open browser automatically: {e}")
+            print(f"Please manually open http://127.0.0.1:{port} in your browser")
     
     threading.Thread(target=open_browser, daemon=True).start()
     
-    print("Starting stats server at http://127.0.0.1:5000")
+    print(f"Starting stats server at http://127.0.0.1:{port}")
     print("CalDAV background sync enabled (every 5 minutes)")
     print("Press Ctrl+C to stop the server")
-    app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
+    try:
+        app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
+    except OSError as e:
+        if "Address already in use" in str(e):
+            print(f"\nError: Port {port} is still in use. Please manually stop the process using this port.")
+            print("You can find it with: lsof -ti :5000")
+            sys.exit(1)
+        else:
+            raise
 
 STATS_HTML = '''
 <!DOCTYPE html>

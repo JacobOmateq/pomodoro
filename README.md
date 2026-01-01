@@ -4,103 +4,35 @@ A terminal-based Pomodoro timer with statistics tracking, web interface, and Cal
 
 ## Features
 
-- 🍅 Terminal-based Pomodoro timer
-- 📊 Statistics tracking with web interface
-- 📅 CalDAV calendar synchronization
-- 🎨 Color-coded task visualization
-- 💾 SQLite database for session storage
-- 📈 View stats by week, month, year, or all time
+- 🍅 **Terminal-based timer** - Simple command-line interface for tracking work sessions
+- 📊 **Statistics dashboard** - Beautiful web interface to view your productivity metrics
+- 📅 **CalDAV sync** - Automatically sync sessions to your calendar
+- 🎨 **Color-coded tasks** - Each task gets a unique color for easy visualization
+- 💾 **Local storage** - All data stored locally in SQLite database
+- 📈 **Flexible reporting** - View stats by week, month, year, or all time
 
-## Installation
+## Quick Start
 
-### Option 1: Install via Homebrew (Recommended)
-
-#### Method A: Using a Homebrew Tap
-
-**Step 1: Create a Homebrew Tap Repository**
-
-Create a GitHub repository named `homebrew-pomodoro` (or `homebrew-<yourname>` for a personal tap):
-
-```bash
-# Create a new repository on GitHub named 'homebrew-pomodoro'
-# Then clone it locally
-git clone https://github.com/JacobOmateq/homebrew-pomodoro.git
-cd homebrew-pomodoro
-```
-
-**Step 2: Add the Formula**
-
-Copy the formula file to your tap:
-
-```bash
-# Copy the formula from this repository
-cp /path/to/pomodoro/Formula/pomodoro.rb Formula/pomodoro.rb
-
-# Update the SHA256 (optional, but recommended for releases)
-# You can get the SHA256 by downloading the zip and running:
-# shasum -a 256 /path/to/downloaded/zip
-
-# Commit and push
-git add Formula/pomodoro.rb
-git commit -m "Add pomodoro formula"
-git push origin main
-```
-
-**Step 3: Install via Homebrew**
+### Install via Homebrew (Recommended)
 
 ```bash
 brew tap JacobOmateq/pomodoro
 brew install pomodoro
 ```
 
-#### Method B: Direct Installation from GitHub
+### Manual Installation
 
-You can also install directly from the GitHub repository:
-
-```bash
-brew install --build-from-source /path/to/pomodoro/Formula/pomodoro.rb
-```
-
-Or create a tap in your local Homebrew:
+If you don't use Homebrew:
 
 ```bash
-# Create tap directory
-mkdir -p $(brew --repository)/Library/Taps/JacobOmateq/homebrew-pomodoro/Formula
-
-# Copy formula
-cp Formula/pomodoro.rb $(brew --repository)/Library/Taps/JacobOmateq/homebrew-pomodoro/Formula/
-
-# Install
-brew install JacobOmateq/pomodoro/pomodoro
-```
-
-**Note:** For production use, it's recommended to create a proper tap repository and optionally create GitHub releases with version tags for better version management.
-
-**Updating the Formula SHA256:**
-
-When you update the repository, you'll need to update the SHA256 in the formula. Use the provided helper script:
-
-```bash
-./update_formula_sha.sh [version_tag]
-# Example: ./update_formula_sha.sh main
-# Example: ./update_formula_sha.sh v1.0.0
-```
-
-### Option 2: Manual Installation
-
-1. Clone this repository:
-```bash
+# Clone the repository
 git clone https://github.com/JacobOmateq/pomodoro.git
 cd pomodoro
-```
 
-2. Install Python dependencies:
-```bash
+# Install dependencies
 pip3 install -r requirements.txt
-```
 
-3. Make the script executable and add to PATH:
-```bash
+# Make executable and add to PATH
 chmod +x pomodoro.py
 sudo ln -s $(pwd)/pomodoro.py /usr/local/bin/pomodoro
 ```
@@ -111,52 +43,145 @@ sudo ln -s $(pwd)/pomodoro.py /usr/local/bin/pomodoro
 
 ```bash
 # Default 25-minute session
-pomodoro <task_name>
+pomodoro coding
 
-# Custom duration
+# Custom duration (supports h, m, and combinations)
 pomodoro learning_option_trading 1h
-pomodoro coding 30m
-pomodoro reading 2h30m
+pomodoro reading 30m
+pomodoro deep_work 2h30m
 ```
 
-### View Statistics
+### View Your Statistics
+
+**Web Interface** (recommended):
+```bash
+pomodoro stats
+```
+This opens a web browser with interactive charts and detailed statistics.
+
+**Terminal Stats**:
+```bash
+pomodoro s w    # Week statistics
+pomodoro s m    # Month statistics
+pomodoro s y    # Year statistics
+pomodoro s a    # All-time statistics
+```
+
+### Examples
 
 ```bash
-# Open web interface
-pomodoro stats
+# Start a 25-minute coding session
+pomodoro coding
 
-# Terminal stats (week)
+# Start a 1-hour learning session
+pomodoro learning 1h
+
+# Start a 2.5-hour deep work session
+pomodoro deep_work 2h30m
+
+# View this week's productivity
 pomodoro s w
 
-# Terminal stats (month)
-pomodoro s m
-
-# Terminal stats (year)
-pomodoro s y
-
-# Terminal stats (all time)
-pomodoro s a
+# Open the web dashboard
+pomodoro stats
 ```
 
 ## Configuration
 
-The application stores data in `~/.pomodoro/`:
-- `sessions.db` - SQLite database with session history
-- `task_colors.json` - Color assignments for tasks
-- `caldav_config.json` - CalDAV calendar sync configuration
+All configuration and data is stored in `~/.pomodoro/`:
+
+- **`sessions.db`** - SQLite database containing all your session history
+- **`task_colors.json`** - Automatic color assignments for each task
+- **`caldav_config.json`** - CalDAV calendar synchronization settings
+
+### Setting up CalDAV Sync
+
+1. Create/edit `~/.pomodoro/caldav_config.json`:
+```json
+{
+  "url": "https://your-calendar-server.com/caldav/",
+  "username": "your-username",
+  "password": "your-password",
+  "calendar_name": "Pomodoro Sessions"
+}
+```
+
+2. Sessions will automatically sync to your calendar when configured.
 
 ## Requirements
 
 - Python 3.x
-- Flask >= 2.0.0
-- icalendar >= 5.0.0
-- caldav >= 1.3.0
+- macOS or Linux (Windows support via WSL)
 
-## License
+Dependencies are automatically installed with Homebrew or via `pip3 install -r requirements.txt`.
 
-[Add your license here]
+## Troubleshooting
 
-## Contributing
+**Command not found after installation:**
+- Make sure `/opt/homebrew/bin` (or `/usr/local/bin` for Intel Macs) is in your PATH
+- Try restarting your terminal
+
+**Web interface won't open:**
+- Check if port 5000 is already in use
+- The server runs on `http://localhost:5000` by default
+
+**Statistics not showing:**
+- Make sure you've completed at least one Pomodoro session
+- Check that `~/.pomodoro/sessions.db` exists
+
+---
+
+## For Developers
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/JacobOmateq/pomodoro.git
+cd pomodoro
+
+# Install dependencies
+pip3 install -r requirements.txt
+
+# Run directly
+python3 pomodoro.py coding 25m
+```
+
+### Project Structure
+
+- `pomodoro.py` - Main application file
+- `requirements.txt` - Python dependencies
+- `Formula/pomodoro.rb` - Homebrew formula
+- `update_formula_sha.sh` - Helper script to update SHA256 checksum
+
+### Updating the Homebrew Formula
+
+When updating the repository, update the SHA256 in the formula:
+
+```bash
+./update_formula_sha.sh main
+```
+
+Then update the formula in the `homebrew-pomodoro` repository:
+
+```bash
+cd ../homebrew-pomodoro
+cp ../pomodoro/Formula/pomodoro.rb Formula/pomodoro.rb
+git add Formula/pomodoro.rb
+git commit -m "Update pomodoro formula"
+git push
+```
+
+### Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### License
+
+[Add your license here]

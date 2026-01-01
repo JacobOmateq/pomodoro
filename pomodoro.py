@@ -948,8 +948,12 @@ class PomodoroTimer:
         sys.stdout.write(status)
         sys.stdout.flush()
     
-    def sync_to_calendar_async(self):
-        """Sync to calendar in a background thread"""
+    def sync_to_calendar_async(self, wait=False):
+        """Sync to calendar in a background thread
+        
+        Args:
+            wait: If True, wait for sync to complete (use when exiting)
+        """
         import threading
         def sync_worker():
             try:
@@ -958,14 +962,30 @@ class PomodoroTimer:
                     if not self.caldav_sync.calendar:
                         success, error = self.caldav_sync.connect()
                         if not success:
+                            print(f"\n⚠️  Calendar sync failed: {error}")
                             return
-                    self.caldav_sync.sync_to_calendar()
+                    result = self.caldav_sync.sync_to_calendar()
+                    if result.get('success'):
+                        synced = result.get('synced', 0)
+                        updated = result.get('updated', 0)
+                        if synced > 0 or updated > 0:
+                            print(f"📅 Calendar synced: {synced} new, {updated} updated")
+                        else:
+                            print(f"📅 Calendar already up to date")
+                    else:
+                        print(f"\n⚠️  Calendar sync failed: {result.get('error', 'Unknown error')}")
+                else:
+                    # No calendar configured - skip silently
+                    pass
             except Exception as sync_error:
-                # Silently fail to avoid interrupting the timer
-                pass
+                print(f"\n⚠️  Calendar sync error: {sync_error}")
         
         thread = threading.Thread(target=sync_worker, daemon=True)
         thread.start()
+        
+        if wait:
+            # Wait for sync to complete (with timeout to avoid hanging forever)
+            thread.join(timeout=30)
     
     def start_session(self):
         """Start a work or break session"""
@@ -1043,8 +1063,8 @@ class PomodoroTimer:
                         "cancelled",
                         completed_seconds
                     )
-                    # Automatically sync to calendar (async, non-blocking)
-                    self.sync_to_calendar_async()
+                    # Sync to calendar and wait for it to complete before exiting
+                    self.sync_to_calendar_async(wait=True)
                 return False
             elif response == 'r':
                 self.remaining_time = self.work_duration if self.is_work_session else self.short_break
@@ -1087,8 +1107,8 @@ class PomodoroTimer:
                     "cancelled",
                     completed_seconds
                 )
-                # Automatically sync to calendar (async, non-blocking)
-                self.sync_to_calendar_async()
+                # Sync to calendar and wait for it to complete before exiting
+                self.sync_to_calendar_async(wait=True)
             print("\n\n👋 Timer stopped. Good work!")
 
 def parse_duration(duration_str):
@@ -4065,6 +4085,51 @@ STATS_HTML = '''
         
         // Fetch stats on load
         loadStats();
+        
+        // Auto-refresh stats every 30 seconds to catch sessions completed via CLI
+        let autoRefreshInterval = null;
+        let lastSessionCount = 0;
+        
+        function startAutoRefresh() {
+            if (autoRefreshInterval) return;
+            autoRefreshInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/stats?period=${currentPeriod}`);
+                    const data = await response.json();
+                    const currentSessionCount = data.sessions ? data.sessions.length : 0;
+                    
+                    // Only refresh the display if session count changed (new session added)
+                    if (currentSessionCount !== lastSessionCount) {
+                        lastSessionCount = currentSessionCount;
+                        loadStats();
+                        console.log('Auto-refreshed: New session detected');
+                    }
+                } catch (error) {
+                    console.error('Auto-refresh check failed:', error);
+                }
+            }, 10000); // Check every 10 seconds
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+        
+        // Start auto-refresh when page loads
+        startAutoRefresh();
+        
+        // Pause auto-refresh when tab is hidden, resume when visible
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopAutoRefresh();
+            } else {
+                startAutoRefresh();
+                // Immediately check for updates when tab becomes visible
+                loadStats();
+            }
+        });
     </script>
 </body>
 </html>

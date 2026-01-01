@@ -3,7 +3,7 @@ class Pomodoro < Formula
   homepage "https://github.com/JacobOmateq/pomodoro"
   url "https://github.com/JacobOmateq/pomodoro/archive/refs/heads/main.zip"
   version "1.0.0"
-  sha256 "a6fafa09aea82bb48f826d820c8694e044420e135f4e2004eb900435d0d0fc76" # This will be calculated when you create a release
+  sha256 "ebd5db0af404d67176d6cd3b59f2e8d614775d56a7a2f7f93fe7f45656410ab2" # This will be calculated when you create a release
   
   depends_on "python@3.11"
 

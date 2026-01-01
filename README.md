@@ -22,20 +22,22 @@ brew install pomodoro
 
 ### Manual Installation
 
-If you don't use Homebrew:
+If you don't use Homebrew, you'll need Python 3.11+ installed first:
 
 ```bash
 # Clone the repository
 git clone https://github.com/JacobOmateq/pomodoro.git
 cd pomodoro
 
-# Install dependencies
+# Install Python dependencies
 pip3 install -r requirements.txt
 
 # Make executable and add to PATH
 chmod +x pomodoro.py
 sudo ln -s $(pwd)/pomodoro.py /usr/local/bin/pomodoro
 ```
+
+**Note:** If `python3` is not found, install Python first (see Prerequisites section below).
 
 ## Usage
 
@@ -108,12 +110,24 @@ All configuration and data is stored in `~/.pomodoro/`:
 
 2. Sessions will automatically sync to your calendar when configured.
 
-## Requirements
+## Prerequisites
 
-- Python 3.x
-- macOS or Linux (Windows support via WSL)
+### For Homebrew Installation
 
-Dependencies are automatically installed with Homebrew or via `pip3 install -r requirements.txt`.
+- **macOS** with Homebrew installed
+- Python 3.11+ (automatically installed by Homebrew as a dependency)
+- No additional setup required - Homebrew handles everything!
+
+### For Manual Installation
+
+- **Python 3.11 or later** - Modern macOS (12.3+) doesn't include Python by default
+  - Check if installed: `python3 --version`
+  - Install if needed: `brew install python` (if you have Homebrew)
+  - Or download from [python.org](https://www.python.org/downloads/)
+- **pip3** (usually comes with Python)
+- **macOS or Linux** (Windows support via WSL)
+
+**Note:** All Python dependencies (Flask, icalendar, caldav) are automatically installed via `pip3 install -r requirements.txt` during manual installation.
 
 ## Troubleshooting
 

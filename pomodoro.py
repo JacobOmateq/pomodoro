@@ -910,6 +910,7 @@ class PomodoroTimer:
         self.remaining_time = self.work_duration
         self.session_start_time = None
         self.db = PomodoroDatabase()
+        self.caldav_sync = CalDAVSync(self.db)
         
     def format_time(self, seconds):
         """Format seconds into MM:SS"""
@@ -946,6 +947,25 @@ class PomodoroTimer:
         status = f"[{session_type}] {time_str} |{bar}| {task_info}"
         sys.stdout.write(status)
         sys.stdout.flush()
+    
+    def sync_to_calendar_async(self):
+        """Sync to calendar in a background thread"""
+        import threading
+        def sync_worker():
+            try:
+                if self.caldav_sync.config.get('url'):
+                    # Connect if not already connected
+                    if not self.caldav_sync.calendar:
+                        success, error = self.caldav_sync.connect()
+                        if not success:
+                            return
+                    self.caldav_sync.sync_to_calendar()
+            except Exception as sync_error:
+                # Silently fail to avoid interrupting the timer
+                pass
+        
+        thread = threading.Thread(target=sync_worker, daemon=True)
+        thread.start()
     
     def start_session(self):
         """Start a work or break session"""
@@ -988,6 +1008,8 @@ class PomodoroTimer:
                     "completed",
                     completed_seconds
                 )
+                # Automatically sync to calendar (async, non-blocking)
+                self.sync_to_calendar_async()
                 self.pomodoro_count += 1
                 print(f"\n✅ Work session complete! Task: {self.task_name}")
                 self.beep()
@@ -1021,6 +1043,8 @@ class PomodoroTimer:
                         "cancelled",
                         completed_seconds
                     )
+                    # Automatically sync to calendar (async, non-blocking)
+                    self.sync_to_calendar_async()
                 return False
             elif response == 'r':
                 self.remaining_time = self.work_duration if self.is_work_session else self.short_break
@@ -1063,6 +1087,8 @@ class PomodoroTimer:
                     "cancelled",
                     completed_seconds
                 )
+                # Automatically sync to calendar (async, non-blocking)
+                self.sync_to_calendar_async()
             print("\n\n👋 Timer stopped. Good work!")
 
 def parse_duration(duration_str):

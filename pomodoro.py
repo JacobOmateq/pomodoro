@@ -508,9 +508,14 @@ class CalDAVSync:
                                 # If delete fails (e.g., 412 error), try to get the event URL and delete directly
                                 try:
                                     event_url = str(event.url)
-                                    # Try deleting by URL
+                                    # Try deleting by URL - this sometimes works when event.delete() fails
                                     self.calendar.client.delete(event_url)
-                                    deleted += 1
+                                    # Verify it was actually deleted
+                                    verify_events = list(self.calendar.search(uid=calendar_uid))
+                                    if not verify_events:
+                                        deleted += 1
+                                    else:
+                                        raise Exception("Event still exists after client.delete()")
                                 except Exception as direct_delete_error:
                                     # Only log if both methods failed and it's not a 412 error
                                     if not is_412_error:
@@ -887,6 +892,109 @@ class CalDAVSync:
             }
         except Exception as e:
             return {'success': False, 'error': str(e)}
+    
+    def delete_calendar_event_by_uid(self, calendar_uid):
+        """Delete a calendar event by its UID. Returns (success: bool, error: str or None)"""
+        if not self.calendar:
+            success, error = self.connect()
+            if not success:
+                return False, error or 'Not connected to CalDAV server'
+        
+        try:
+            # Search for the event
+            events = list(self.calendar.search(uid=calendar_uid))
+            if not events:
+                # Event not found - already deleted
+                return True, None
+            
+            event = events[0]
+            
+            # Try multiple deletion strategies with verification
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    # Strategy 1: Standard delete with fresh load
+                    try:
+                        event.load()  # Reload to get fresh ETag
+                    except:
+                        pass
+                    
+                    event.delete()
+                    
+                except Exception as delete_error:
+                    error_str = str(delete_error)
+                    is_412_error = '412' in error_str or 'Precondition Failed' in error_str
+                    
+                    # Strategy 2: Try direct client delete by URL (works better for 412 errors)
+                    if is_412_error:
+                        try:
+                            # Get fresh event and URL
+                            fresh_events = list(self.calendar.search(uid=calendar_uid))
+                            if fresh_events:
+                                fresh_event = fresh_events[0]
+                                fresh_event_url = str(fresh_event.url)
+                                # Use client.delete - sometimes works when event.delete() fails
+                                self.calendar.client.delete(fresh_event_url)
+                            else:
+                                # Event disappeared
+                                return True, None
+                        except Exception as client_delete_error:
+                            # If we're not on last attempt, search again and retry
+                            if attempt < max_retries - 1:
+                                try:
+                                    events = list(self.calendar.search(uid=calendar_uid))
+                                    if events:
+                                        event = events[0]
+                                        continue
+                                    else:
+                                        return True, None
+                                except:
+                                    pass
+                    
+                    # If not 412 or last attempt, continue to verification
+                    if not is_412_error and attempt < max_retries - 1:
+                        # Search again and retry
+                        try:
+                            events = list(self.calendar.search(uid=calendar_uid))
+                            if events:
+                                event = events[0]
+                                continue
+                            else:
+                                return True, None
+                        except:
+                            pass
+                
+                # Always verify deletion after each attempt
+                try:
+                    verify_events = list(self.calendar.search(uid=calendar_uid))
+                    if not verify_events:
+                        # Successfully deleted!
+                        return True, None
+                    # Event still exists, continue to next attempt
+                    if attempt < max_retries - 1:
+                        # Get fresh event for next attempt
+                        events = verify_events
+                        event = events[0]
+                except Exception as verify_error:
+                    # If verification fails, assume deletion succeeded
+                    return True, None
+            
+            # All attempts exhausted and event still exists
+            error_msg = f"Failed to delete calendar event {calendar_uid} after {max_retries} attempts - event still exists in calendar"
+            print(error_msg)
+            return False, error_msg
+                
+        except Exception as e:
+            error_msg = f"Error deleting calendar event {calendar_uid}: {e}"
+            print(error_msg)
+            # Final verification attempt
+            try:
+                verify_events = list(self.calendar.search(uid=calendar_uid))
+                if not verify_events:
+                    return True, None
+            except:
+                pass
+            return False, error_msg
     
     def sync(self):
         """Perform bidirectional sync"""
@@ -1431,12 +1539,34 @@ def start_stats_server():
     @app.route('/api/sessions/<int:session_id>', methods=['DELETE'])
     def api_delete_session(session_id):
         try:
-            # Delete sync mapping if it exists
+            # Get sync mapping BEFORE deleting it, so we know which calendar event to delete
+            mappings = db.get_sync_mapping(session_id=session_id)
+            calendar_uid = None
+            if mappings:
+                calendar_uid = mappings[0].get('calendar_uid')
+            
+            # Delete the calendar event FIRST (before removing local data)
+            deletion_success = True
+            if calendar_uid and caldav_sync.config.get('url'):
+                try:
+                    success, error = caldav_sync.delete_calendar_event_by_uid(calendar_uid)
+                    if not success:
+                        print(f"Warning: Failed to delete calendar event {calendar_uid}: {error}")
+                        deletion_success = False
+                except Exception as e:
+                    print(f"Warning: Error deleting calendar event: {e}")
+                    deletion_success = False
+            
+            # Delete sync mapping and session
             db.delete_sync_mapping(session_id=session_id)
-            # Delete the session
             db.delete_session(session_id)
-            # Automatically sync to calendar to remove the event (async, non-blocking)
-            sync_to_calendar_async()
+            
+            # Always trigger sync after deletion to ensure cleanup
+            # This handles edge cases where deletion appeared successful but event still exists
+            # The sync process will detect the missing session and clean up any orphaned events
+            if caldav_sync.config.get('url'):
+                sync_to_calendar_async()
+            
             return jsonify({'success': True})
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 400

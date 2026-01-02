@@ -302,6 +302,53 @@ class PomodoroDatabase:
             return dict(row)
         return None
     
+    def get_or_create_current_session(self, task_name, start_time):
+        """Get the current session for today with the same task, or create a new one"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Convert start_time to date string for comparison
+        if hasattr(start_time, 'date'):
+            today = start_time.date().isoformat()
+        elif hasattr(start_time, 'isoformat'):
+            today = start_time.split('T')[0] if 'T' in str(start_time) else str(start_time).split(' ')[0]
+        else:
+            today = str(start_time).split('T')[0] if 'T' in str(start_time) else str(start_time).split(' ')[0]
+        
+        # Find the most recent session for today with the same task name
+        # Prefer sessions without an end_time (still running) or with status 'running'
+        cursor.execute('''
+            SELECT * FROM sessions 
+            WHERE task_name = ? 
+            AND DATE(start_time) = ?
+            ORDER BY 
+                CASE WHEN end_time IS NULL THEN 0 ELSE 1 END,
+                CASE WHEN status = 'running' THEN 0 ELSE 1 END,
+                start_time DESC
+            LIMIT 1
+        ''', (task_name, today))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            session = dict(row)
+            # Return the session ID - we'll update it when pomodoro completes
+            # If it has an end_time, we'll update it to extend the duration
+            return session['id']
+        
+        # No session found for today - create a new one
+        session_id = self.add_session(
+            task_name=task_name,
+            duration_seconds=0,  # Will be updated when pomodoro completes
+            start_time=start_time,
+            end_time=None,  # No end time yet - session is running
+            status='running',
+            completed_seconds=0
+        )
+        return session_id
+    
     def delete_session(self, session_id):
         """Delete a session from the database"""
         conn = sqlite3.connect(self.db_path)
@@ -737,6 +784,159 @@ class CalDAVSync:
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    def sync_session_to_calendar(self, session_id):
+        """Lightweight sync of a single session to calendar (no full cleanup)
+        
+        This is optimized for quick syncs when canceling/stopping a session.
+        It only syncs the specified session without checking all calendar events.
+        """
+        if not self.calendar:
+            success, error = self.connect()
+            if not success:
+                return {'success': False, 'error': error or 'Not connected to CalDAV server'}
+        
+        try:
+            # Get the specific session from database
+            conn = sqlite3.connect(self.db.db_path)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM sessions WHERE id = ?', (session_id,))
+            session_row = cursor.fetchone()
+            conn.close()
+            
+            if not session_row:
+                return {'success': False, 'error': f'Session {session_id} not found'}
+            
+            session = dict(session_row)
+            
+            # Check if already synced
+            mapping = self.db.get_sync_mapping(session_id=session_id)
+            
+            start_time = datetime.fromisoformat(session['start_time'].replace('Z', '+00:00'))
+            end_time = session['end_time']
+            if end_time:
+                end_time = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+            else:
+                end_time = start_time + timedelta(seconds=session['duration_seconds'])
+            
+            uid = f"pomodoro-{session_id}@pomodoro-timer"
+            summary = f"🍅 {session['task_name']}"
+            description = f"Pomodoro session: {session['task_name']}\nDuration: {session['duration_seconds']//60} minutes\nCompleted: {session['completed_seconds']//60} minutes\nStatus: {session['status']}"
+            
+            if mapping:
+                # Update existing event using the mapped UID
+                calendar_uid = mapping[0]['calendar_uid']
+                try:
+                    events = self.calendar.search(uid=calendar_uid)
+                    if events:
+                        event = events[0]
+                        # Reload event to get fresh ETag before updating
+                        try:
+                            event.load()
+                        except:
+                            pass  # If load fails, try update anyway
+                        
+                        try:
+                            event.icalendar_component['summary'] = summary
+                            event.icalendar_component['description'] = description
+                            event.icalendar_component['dtstart'].dt = start_time
+                            event.icalendar_component['dtend'].dt = end_time
+                            event.save()
+                            return {'success': True, 'updated': 1}
+                        except Exception as save_error:
+                            # Check if it's a 412 Precondition Failed (ETag mismatch) - common and recoverable
+                            error_str = str(save_error)
+                            is_412_error = '412' in error_str or 'Precondition Failed' in error_str
+                            
+                            # If save fails (e.g., 412 error), try recreating the event
+                            if not is_412_error:
+                                print(f"Error updating calendar event {calendar_uid}: {save_error}, recreating...")
+                            try:
+                                # Delete old event first
+                                try:
+                                    event.delete()
+                                except:
+                                    pass
+                                # Create new event with same UID
+                                from icalendar import Calendar, Event
+                                cal = Calendar()
+                                cal.add('prodid', '-//Pomodoro Timer//EN')
+                                cal.add('version', '2.0')
+                                
+                                new_event = Event()
+                                new_event.add('summary', summary)
+                                new_event.add('description', description)
+                                new_event.add('dtstart', start_time)
+                                new_event.add('dtend', end_time)
+                                new_event.add('uid', calendar_uid)
+                                cal.add_component(new_event)
+                                
+                                self.calendar.add_event(cal.to_ical())
+                                return {'success': True, 'updated': 1}
+                            except Exception as recreate_error:
+                                print(f"Error recreating calendar event {calendar_uid}: {recreate_error}")
+                                # Fall through to create new event below
+                                mapping = []
+                    else:
+                        # Event was deleted from calendar, recreate it with same UID
+                        from icalendar import Calendar, Event
+                        cal = Calendar()
+                        cal.add('prodid', '-//Pomodoro Timer//EN')
+                        cal.add('version', '2.0')
+                        
+                        event = Event()
+                        event.add('summary', summary)
+                        event.add('description', description)
+                        event.add('dtstart', start_time)
+                        event.add('dtend', end_time)
+                        event.add('uid', calendar_uid)  # Use existing UID from mapping
+                        cal.add_component(event)
+                        
+                        self.calendar.add_event(cal.to_ical())
+                        return {'success': True, 'synced': 1}
+                except Exception as e:
+                    # Check if it's a 412 Precondition Failed - common and recoverable
+                    error_str = str(e)
+                    is_412_error = '412' in error_str or 'Precondition Failed' in error_str
+                    if not is_412_error:
+                        print(f"Error updating calendar event: {e}")
+                    # Event not found, recreate with same UID
+                    from icalendar import Calendar, Event
+                    cal = Calendar()
+                    cal.add('prodid', '-//Pomodoro Timer//EN')
+                    cal.add('version', '2.0')
+                    
+                    event = Event()
+                    event.add('summary', summary)
+                    event.add('description', description)
+                    event.add('dtstart', start_time)
+                    event.add('dtend', end_time)
+                    event.add('uid', calendar_uid)  # Use existing UID from mapping
+                    cal.add_component(event)
+                    
+                    self.calendar.add_event(cal.to_ical())
+                    return {'success': True, 'synced': 1}
+            else:
+                # No mapping exists - create new event and mapping
+                from icalendar import Calendar, Event
+                cal = Calendar()
+                cal.add('prodid', '-//Pomodoro Timer//EN')
+                cal.add('version', '2.0')
+                
+                event = Event()
+                event.add('summary', summary)
+                event.add('description', description)
+                event.add('dtstart', start_time)
+                event.add('dtend', end_time)
+                event.add('uid', uid)
+                cal.add_component(event)
+                
+                self.calendar.add_event(cal.to_ical())
+                self.db.set_sync_mapping(session_id, uid)
+                return {'success': True, 'synced': 1}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
     def sync_from_calendar(self):
         """Sync calendar events to local sessions"""
         if not self.calendar:
@@ -985,15 +1185,24 @@ class CalDAVSync:
             return False, error_msg
                 
         except Exception as e:
-            error_msg = f"Error deleting calendar event {calendar_uid}: {e}"
-            print(error_msg)
-            # Final verification attempt
+            error_str = str(e)
+            is_412_error = '412' in error_str or 'Precondition Failed' in error_str
+            
+            # Final verification attempt - check if deletion actually succeeded despite the error
             try:
                 verify_events = list(self.calendar.search(uid=calendar_uid))
                 if not verify_events:
+                    # Deletion succeeded! Don't print error for 412 errors that resolved
+                    if not is_412_error:
+                        # Only log non-412 errors that still succeeded (unusual case)
+                        pass
                     return True, None
             except:
                 pass
+            
+            # Event still exists - this is a real failure
+            error_msg = f"Error deleting calendar event {calendar_uid}: {e}"
+            print(error_msg)
             return False, error_msg
     
     def sync(self):
@@ -1019,6 +1228,7 @@ class PomodoroTimer:
         self.start_time = None
         self.remaining_time = self.work_duration
         self.session_start_time = None
+        self.current_session_id = None  # Track the current running session
         self.db = PomodoroDatabase()
         self.caldav_sync = CalDAVSync(self.db)
         
@@ -1058,11 +1268,12 @@ class PomodoroTimer:
         sys.stdout.write(status)
         sys.stdout.flush()
     
-    def sync_to_calendar_async(self, wait=False):
+    def sync_to_calendar_async(self, wait=False, session_id=None):
         """Sync to calendar in a background thread
         
         Args:
             wait: If True, wait for sync to complete (use when exiting)
+            session_id: If provided, only sync this specific session (fast, no cleanup)
         """
         import threading
         def sync_worker():
@@ -1074,16 +1285,31 @@ class PomodoroTimer:
                         if not success:
                             print(f"\n⚠️  Calendar sync failed: {error}")
                             return
-                    result = self.caldav_sync.sync_to_calendar()
-                    if result.get('success'):
-                        synced = result.get('synced', 0)
-                        updated = result.get('updated', 0)
-                        if synced > 0 or updated > 0:
-                            print(f"📅 Calendar synced: {synced} new, {updated} updated")
+                    
+                    # If session_id is provided, do lightweight single-session sync
+                    if session_id:
+                        result = self.caldav_sync.sync_session_to_calendar(session_id)
+                        if result.get('success'):
+                            synced = result.get('synced', 0)
+                            updated = result.get('updated', 0)
+                            if synced > 0:
+                                print(f"📅 Calendar synced: session saved")
+                            elif updated > 0:
+                                print(f"📅 Calendar synced: session updated")
                         else:
-                            print(f"📅 Calendar already up to date")
+                            print(f"\n⚠️  Calendar sync failed: {result.get('error', 'Unknown error')}")
                     else:
-                        print(f"\n⚠️  Calendar sync failed: {result.get('error', 'Unknown error')}")
+                        # Full sync with cleanup
+                        result = self.caldav_sync.sync_to_calendar()
+                        if result.get('success'):
+                            synced = result.get('synced', 0)
+                            updated = result.get('updated', 0)
+                            if synced > 0 or updated > 0:
+                                print(f"📅 Calendar synced: {synced} new, {updated} updated")
+                            else:
+                                print(f"📅 Calendar already up to date")
+                        else:
+                            print(f"\n⚠️  Calendar sync failed: {result.get('error', 'Unknown error')}")
                 else:
                     # No calendar configured - skip silently
                     pass
@@ -1102,6 +1328,33 @@ class PomodoroTimer:
         if self.is_work_session:
             self.remaining_time = self.work_duration
             self.session_start_time = datetime.now()
+            
+            # Check if we need to create a new session (task name changed or no current session)
+            if self.current_session_id:
+                # Verify the current session still exists and matches the task name
+                conn = sqlite3.connect(self.db.db_path)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute('SELECT task_name FROM sessions WHERE id = ?', (self.current_session_id,))
+                session = cursor.fetchone()
+                conn.close()
+                
+                if session and session['task_name'] == self.task_name:
+                    # Same task, continue with current session
+                    pass
+                else:
+                    # Task name changed or session deleted, get/create new session
+                    self.current_session_id = self.db.get_or_create_current_session(
+                        self.task_name,
+                        self.session_start_time
+                    )
+            else:
+                # No current session, get or create one
+                self.current_session_id = self.db.get_or_create_current_session(
+                    self.task_name,
+                    self.session_start_time
+                )
+            
             duration_str = self.format_time(self.work_duration)
             print(f"\n🍅 Starting work session: {self.task_name} ({duration_str})")
         else:
@@ -1130,14 +1383,63 @@ class PomodoroTimer:
             if self.is_work_session:
                 end_time = datetime.now()
                 completed_seconds = int(self.work_duration - self.remaining_time)
-                self.db.save_session(
-                    self.task_name,
-                    self.work_duration,
-                    self.session_start_time,
-                    end_time,
-                    "completed",
-                    completed_seconds
-                )
+                
+                # Update the current session instead of creating a new one
+                if self.current_session_id:
+                    # Get current session to update duration
+                    conn = sqlite3.connect(self.db.db_path)
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT * FROM sessions WHERE id = ?', (self.current_session_id,))
+                    session = cursor.fetchone()
+                    conn.close()
+                    
+                    if session:
+                        session_dict = dict(session)
+                        # Update duration and completed_seconds by adding to existing values
+                        current_duration = session_dict.get('duration_seconds', 0) or 0
+                        current_completed = session_dict.get('completed_seconds', 0) or 0
+                        new_duration = current_duration + self.work_duration
+                        new_completed = current_completed + completed_seconds
+                        
+                        # Preserve the original start_time (use the earlier one)
+                        original_start_time = datetime.fromisoformat(session_dict['start_time'].replace('Z', '+00:00'))
+                        if self.session_start_time < original_start_time:
+                            update_start_time = self.session_start_time
+                        else:
+                            update_start_time = original_start_time
+                        
+                        # Update the session
+                        self.db.update_session(
+                            self.current_session_id,
+                            start_time=update_start_time,
+                            duration_seconds=new_duration,
+                            end_time=end_time,
+                            status='completed',
+                            completed_seconds=new_completed
+                        )
+                        print(f"💾 Updated session: {self.task_name} - Total: {new_completed//60} min")
+                    else:
+                        # Session was deleted, create a new one
+                        self.current_session_id = self.db.add_session(
+                            self.task_name,
+                            self.work_duration,
+                            self.session_start_time,
+                            end_time,
+                            "completed",
+                            completed_seconds
+                        )
+                else:
+                    # No current session ID, create a new one
+                    self.current_session_id = self.db.add_session(
+                        self.task_name,
+                        self.work_duration,
+                        self.session_start_time,
+                        end_time,
+                        "completed",
+                        completed_seconds
+                    )
+                
                 # Automatically sync to calendar (async, non-blocking)
                 self.sync_to_calendar_async()
                 self.pomodoro_count += 1
@@ -1165,16 +1467,64 @@ class PomodoroTimer:
                 if self.is_work_session and self.session_start_time:
                     end_time = datetime.now()
                     completed_seconds = int(self.work_duration - self.remaining_time)
-                    self.db.save_session(
-                        self.task_name,
-                        self.work_duration,
-                        self.session_start_time,
-                        end_time,
-                        "cancelled",
-                        completed_seconds
-                    )
-                    # Sync to calendar and wait for it to complete before exiting
-                    self.sync_to_calendar_async(wait=True)
+                    
+                    # Update the current session instead of creating a new one
+                    if self.current_session_id:
+                        # Get current session to update duration
+                        conn = sqlite3.connect(self.db.db_path)
+                        conn.row_factory = sqlite3.Row
+                        cursor = conn.cursor()
+                        cursor.execute('SELECT * FROM sessions WHERE id = ?', (self.current_session_id,))
+                        session = cursor.fetchone()
+                        conn.close()
+                        
+                        if session:
+                            session_dict = dict(session)
+                            # Update duration and completed_seconds by adding to existing values
+                            current_duration = session_dict.get('duration_seconds', 0) or 0
+                            current_completed = session_dict.get('completed_seconds', 0) or 0
+                            new_duration = current_duration + self.work_duration
+                            new_completed = current_completed + completed_seconds
+                            
+                            # Preserve the original start_time (use the earlier one)
+                            original_start_time = datetime.fromisoformat(session_dict['start_time'].replace('Z', '+00:00'))
+                            if self.session_start_time < original_start_time:
+                                update_start_time = self.session_start_time
+                            else:
+                                update_start_time = original_start_time
+                            
+                            # Update the session
+                            self.db.update_session(
+                                self.current_session_id,
+                                start_time=update_start_time,
+                                duration_seconds=new_duration,
+                                end_time=end_time,
+                                status='cancelled',
+                                completed_seconds=new_completed
+                            )
+                            session_id_to_sync = self.current_session_id
+                        else:
+                            # Session was deleted, create a new one
+                            session_id_to_sync = self.db.add_session(
+                                self.task_name,
+                                self.work_duration,
+                                self.session_start_time,
+                                end_time,
+                                "cancelled",
+                                completed_seconds
+                            )
+                    else:
+                        # No current session ID, create a new one
+                        session_id_to_sync = self.db.add_session(
+                            self.task_name,
+                            self.work_duration,
+                            self.session_start_time,
+                            end_time,
+                            "cancelled",
+                            completed_seconds
+                        )
+                    # Sync to calendar and wait for it to complete before exiting (lightweight sync)
+                    self.sync_to_calendar_async(wait=True, session_id=session_id_to_sync)
                 return False
             elif response == 'r':
                 self.remaining_time = self.work_duration if self.is_work_session else self.short_break
@@ -1209,7 +1559,8 @@ class PomodoroTimer:
             if self.is_work_session and self.session_start_time:
                 end_time = datetime.now()
                 completed_seconds = int(self.work_duration - self.remaining_time)
-                self.db.save_session(
+                # Use add_session to get session_id for lightweight sync
+                session_id_to_sync = self.db.add_session(
                     self.task_name,
                     self.work_duration,
                     self.session_start_time,
@@ -1217,8 +1568,8 @@ class PomodoroTimer:
                     "cancelled",
                     completed_seconds
                 )
-                # Sync to calendar and wait for it to complete before exiting
-                self.sync_to_calendar_async(wait=True)
+                # Sync to calendar and wait for it to complete before exiting (lightweight sync)
+                self.sync_to_calendar_async(wait=True, session_id=session_id_to_sync)
             print("\n\n👋 Timer stopped. Good work!")
 
 def parse_duration(duration_str):

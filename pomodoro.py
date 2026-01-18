@@ -2792,7 +2792,7 @@ STATS_HTML = '''
             
             <div class="task-breakdown">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <h2 style="margin: 0;">📊 Task Overview</h2>
+                    <h2 style="margin: 0;">📊 Task Overview <span id="task-overview-total" style="font-size: 0.8em; color: #666; font-weight: normal; margin-left: 10px;"></span></h2>
                     <button class="btn-customize-colors" onclick="showColorsModal()">🎨 Customize Colors</button>
                 </div>
                 <div id="task-breakdown-content"></div>
@@ -3184,13 +3184,18 @@ STATS_HTML = '''
         
         function displayTaskBreakdown(sessions) {
             const breakdownContent = document.getElementById('task-breakdown-content');
+            const totalTimeEl = document.getElementById('task-overview-total');
             
             // Calculate task breakdown from sessions
             const taskBreakdown = {};
+            let grandTotalSeconds = 0;
+            
             sessions.forEach(session => {
                 if (!session.start_time) return;
                 const taskName = session.task_name || 'Unknown';
                 const timeSeconds = session.completed_seconds || 0;
+                
+                grandTotalSeconds += timeSeconds;
                 
                 if (!taskBreakdown[taskName]) {
                     taskBreakdown[taskName] = {
@@ -3202,6 +3207,11 @@ STATS_HTML = '''
                 taskBreakdown[taskName].total_time += timeSeconds;
                 taskBreakdown[taskName].count += 1;
             });
+            
+            // Update total time display
+            if (totalTimeEl) {
+                totalTimeEl.textContent = formatTime(grandTotalSeconds);
+            }
             
             const tasks = Object.values(taskBreakdown);
             

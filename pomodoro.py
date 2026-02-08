@@ -1404,6 +1404,9 @@ class PomodoroTimer:
                         
                         # Preserve the original start_time (use the earlier one)
                         original_start_time = datetime.fromisoformat(session_dict['start_time'].replace('Z', '+00:00'))
+                        # Normalize to naive local so we can compare with session_start_time (naive local)
+                        if original_start_time.tzinfo is not None:
+                            original_start_time = original_start_time.astimezone().replace(tzinfo=None)
                         if self.session_start_time < original_start_time:
                             update_start_time = self.session_start_time
                         else:
@@ -1488,6 +1491,9 @@ class PomodoroTimer:
                             
                             # Preserve the original start_time (use the earlier one)
                             original_start_time = datetime.fromisoformat(session_dict['start_time'].replace('Z', '+00:00'))
+                            # Normalize to naive local so we can compare with session_start_time (naive local)
+                            if original_start_time.tzinfo is not None:
+                                original_start_time = original_start_time.astimezone().replace(tzinfo=None)
                             if self.session_start_time < original_start_time:
                                 update_start_time = self.session_start_time
                             else:

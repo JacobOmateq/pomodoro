@@ -3927,7 +3927,7 @@ STATS_HTML = '''
                     
                     if (route.step) {
                         // Extract step number from step-1, step-2, etc.
-                        const stepMatch = route.step.match(/step-(\d+)/);
+                        const stepMatch = route.step.match(/step-(\\d+)/);
                         if (stepMatch) {
                             const stepNum = parseInt(stepMatch[1]);
                             if (stepNum >= 1 && stepNum <= 4) {

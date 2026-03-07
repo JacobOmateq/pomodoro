@@ -24,6 +24,11 @@ DB_PATH.parent.mkdir(exist_ok=True)
 # Task colors setup
 COLORS_PATH = Path.home() / ".pomodoro" / "task_colors.json"
 
+# Consultancy tasks: tasks marked as consultancy gigs (time shown with break multiplier)
+CONSULTANCY_TASKS_PATH = Path.home() / ".pomodoro" / "consultancy_tasks.json"
+# 5 min break every 25 min work → billable = logged * (30/25) ≈ 1.2
+CONSULTANCY_MULTIPLIER = 30 / 25
+
 # CalDAV config setup
 CALDAV_CONFIG_PATH = Path.home() / ".pomodoro" / "caldav_config.json"
 
@@ -107,6 +112,37 @@ class TaskColorManager:
     def get_all_colors(self):
         """Get all task colors"""
         return self.colors.copy()
+
+
+def load_consultancy_tasks():
+    """Load set of task names marked as consultancy gigs."""
+    if not CONSULTANCY_TASKS_PATH.exists():
+        return set()
+    try:
+        with open(CONSULTANCY_TASKS_PATH, 'r') as f:
+            data = json.load(f)
+        return set(data) if isinstance(data, list) else set(data.keys())
+    except (json.JSONDecodeError, IOError):
+        return set()
+
+
+def save_consultancy_tasks(task_names_set):
+    """Save set of task names marked as consultancy gigs."""
+    CONSULTANCY_TASKS_PATH.parent.mkdir(exist_ok=True)
+    with open(CONSULTANCY_TASKS_PATH, 'w') as f:
+        json.dump(list(task_names_set), f, indent=2)
+
+
+def set_task_consultancy(task_name, is_consultancy):
+    """Mark or unmark a task as consultancy. Returns new set of consultancy task names."""
+    tasks = load_consultancy_tasks()
+    if is_consultancy:
+        tasks.add(task_name)
+    else:
+        tasks.discard(task_name)
+    save_consultancy_tasks(tasks)
+    return tasks
+
 
 class PomodoroDatabase:
     def __init__(self, db_path=DB_PATH):
@@ -1833,7 +1869,25 @@ def start_stats_server():
             return jsonify({'success': False, 'error': 'Color not provided'}), 400
         color_manager.set_color(task_name, data['color'])
         return jsonify({'success': True, 'color': data['color']})
-    
+
+    @app.route('/api/consultancy-tasks')
+    def api_get_consultancy_tasks():
+        """Get set of task names marked as consultancy gigs and the time multiplier."""
+        return jsonify({
+            'tasks': list(load_consultancy_tasks()),
+            'multiplier': CONSULTANCY_MULTIPLIER
+        })
+
+    @app.route('/api/consultancy-tasks/<path:task_name>', methods=['PUT'])
+    def api_set_task_consultancy(task_name):
+        """Mark or unmark a task as consultancy gig."""
+        from urllib.parse import unquote
+        task_name = unquote(task_name)
+        data = request.json or {}
+        is_consultancy = data.get('consultancy', True)
+        set_task_consultancy(task_name, is_consultancy)
+        return jsonify({'success': True, 'consultancy': is_consultancy})
+
     # Helper function for async calendar sync
     import threading
     def sync_to_calendar_async():
@@ -3144,12 +3198,33 @@ STATS_HTML = '''
         </div>
     </div>
     
+    <!-- Task History Modal (click task in overview) -->
+    <div id="task-history-modal" class="modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 id="task-history-title">Task history</h2>
+                <button class="close-btn" onclick="closeTaskHistoryModal()">&times;</button>
+            </div>
+            <div style="padding: 20px 0;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 12px; background: #f5f5f5; border-radius: 8px;">
+                    <label style="font-weight: 600; color: #333;">Mark as consultancy gig</label>
+                    <input type="checkbox" id="task-consultancy-toggle" onchange="toggleTaskConsultancy()">
+                </div>
+                <p style="font-size: 0.85em; color: #666; margin-bottom: 12px;">Time logged per day for this task:</p>
+                <div id="task-history-days" style="max-height: 50vh; overflow-y: auto;"></div>
+            </div>
+        </div>
+    </div>
+    
     <script>
         let currentPeriod = 'week';
         let currentView = 'weekly';
         let currentDate = new Date();
         let allSessions = [];
         let taskColors = {};
+        let consultancyTasks = new Set();
+        let consultancyMultiplier = 1.2;
+        let taskHistoryCurrentTask = null;
         
         function loadTaskColors() {
             fetch('/api/task-colors')
@@ -3186,6 +3261,69 @@ STATS_HTML = '''
             const saturation = 60 + (Math.abs(hash) % 30);
             const lightness = 45 + (Math.abs(hash) % 20);
             return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+        }
+        
+        function formatTimeWithConsultancy(seconds, isConsultancy) {
+            const main = formatTime(seconds);
+            if (!isConsultancy) return main;
+            const consultancySeconds = Math.round(seconds * consultancyMultiplier);
+            return main + ' (' + formatTime(consultancySeconds) + ')';
+        }
+        
+        function formatTimeShortWithConsultancy(seconds, isConsultancy) {
+            const main = formatTimeShort(seconds);
+            if (!isConsultancy) return main;
+            const consultancySeconds = Math.round(seconds * consultancyMultiplier);
+            return main + ' (' + formatTimeShort(consultancySeconds) + ')';
+        }
+        
+        function showTaskHistoryModal(taskName) {
+            taskHistoryCurrentTask = taskName;
+            document.getElementById('task-history-title').textContent = taskName;
+            document.getElementById('task-consultancy-toggle').checked = consultancyTasks.has(taskName);
+            const sessionsForTask = allSessions.filter(s => s.task_name === taskName && s.start_time);
+            const byDate = {};
+            sessionsForTask.forEach(s => {
+                const dateStr = getLocalDateString(new Date(s.start_time));
+                if (!byDate[dateStr]) byDate[dateStr] = 0;
+                byDate[dateStr] += s.completed_seconds || 0;
+            });
+            const sortedDates = Object.entries(byDate).sort((a, b) => b[0].localeCompare(a[0]));
+            const container = document.getElementById('task-history-days');
+            if (sortedDates.length === 0) {
+                container.innerHTML = '<p style="color: #999; padding: 10px 0;">No sessions yet for this task.</p>';
+            } else {
+                container.innerHTML = sortedDates.map(([dateStr, sec]) => {
+                    const d = new Date(dateStr);
+                    const label = d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+                    return '<div style="padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between;"><span>' + label + '</span><span class="task-time-large">' + formatTime(sec) + '</span></div>';
+                }).join('');
+            }
+            document.getElementById('task-history-modal').style.display = 'flex';
+        }
+        
+        function closeTaskHistoryModal() {
+            document.getElementById('task-history-modal').style.display = 'none';
+            taskHistoryCurrentTask = null;
+        }
+        
+        function toggleTaskConsultancy() {
+            if (!taskHistoryCurrentTask) return;
+            const isConsultancy = document.getElementById('task-consultancy-toggle').checked;
+            fetch('/api/consultancy-tasks/' + encodeURIComponent(taskHistoryCurrentTask), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ consultancy: isConsultancy })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    if (isConsultancy) consultancyTasks.add(taskHistoryCurrentTask);
+                    else consultancyTasks.delete(taskHistoryCurrentTask);
+                    loadStats();
+                }
+            })
+            .catch(err => console.error('Error updating consultancy:', err));
         }
         
         function displayTaskBreakdown(sessions) {
@@ -3234,18 +3372,23 @@ STATS_HTML = '''
             sortedTasks.forEach((task) => {
                 const timeSeconds = task.total_time || 0;
                 const taskColor = getTaskColor(task.task_name);
+                const isConsultancy = consultancyTasks.has(task.task_name);
+                const timeDisplay = formatTimeWithConsultancy(timeSeconds, isConsultancy);
                 
                 const taskItem = document.createElement('div');
                 taskItem.className = 'task-list-item';
                 taskItem.style.borderLeft = `4px solid ${taskColor}`;
+                taskItem.style.cursor = 'pointer';
+                taskItem.title = 'Click to see history and mark as consultancy gig';
                 
                 taskItem.innerHTML = `
                     <div style="display: flex; align-items: center; gap: 10px;">
                         <div style="width: 16px; height: 16px; border-radius: 4px; background: ${taskColor}; border: 1px solid rgba(0,0,0,0.1);"></div>
                         <span class="task-name-large">${task.task_name}</span>
                     </div>
-                    <span class="task-time-large">${formatTime(timeSeconds)}</span>
+                    <span class="task-time-large">${timeDisplay}</span>
                 `;
+                taskItem.onclick = () => showTaskHistoryModal(task.task_name);
                 
                 breakdownContent.appendChild(taskItem);
             });
@@ -3653,6 +3796,8 @@ STATS_HTML = '''
                     
                     sortedTasksArray.forEach(([taskName, taskTime]) => {
                         const taskColor = getTaskColor(taskName);
+                        const isConsultancy = consultancyTasks.has(taskName);
+                        const timeDisplay = formatTimeShortWithConsultancy(taskTime, isConsultancy);
                         const taskItem = document.createElement('div');
                         taskItem.style.marginBottom = '4px';
                         taskItem.style.padding = '4px 6px';
@@ -3670,7 +3815,7 @@ STATS_HTML = '''
                                     ${taskName}
                                 </div>
                                 <div style="color: #666; font-size: 0.9em;">
-                                    ${formatTimeShort(taskTime)}
+                                    ${timeDisplay}
                                 </div>
                             </div>
                         `;
@@ -4655,6 +4800,7 @@ STATS_HTML = '''
             const syncModal = document.getElementById('sync-modal');
             const daySessionsModal = document.getElementById('day-sessions-modal');
             const colorsModal = document.getElementById('colors-modal');
+            const taskHistoryModal = document.getElementById('task-history-modal');
             if (event.target === sessionModal) {
                 closeModal();
             }
@@ -4666,6 +4812,9 @@ STATS_HTML = '''
             }
             if (event.target === colorsModal) {
                 closeColorsModal();
+            }
+            if (event.target === taskHistoryModal) {
+                closeTaskHistoryModal();
             }
         }
         
@@ -4761,10 +4910,13 @@ STATS_HTML = '''
             
             Promise.all([
                 fetch(`/api/stats?period=${currentPeriod}`).then(r => r.json()),
-                fetch('/api/task-colors').then(r => r.json())
+                fetch('/api/task-colors').then(r => r.json()),
+                fetch('/api/consultancy-tasks').then(r => r.json())
             ])
-                .then(([statsData, colors]) => {
+                .then(([statsData, colors, consultancyData]) => {
                     taskColors = colors;
+                    consultancyTasks = new Set(consultancyData.tasks || []);
+                    consultancyMultiplier = consultancyData.multiplier || 1.2;
                     displayStats(statsData);
                 })
                 .catch(error => {
